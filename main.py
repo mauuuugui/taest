@@ -1,105 +1,210 @@
 import os
 import random
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import string
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
+from telegram import Update, InputFile
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 
 # ==========================
 # CONFIG
 # ==========================
 TOKEN = os.environ["BOT_TOKEN"]
 
-# balances stored in memory (for demo; use DB for production)
+# user_data = {user_id: {"balance": 0, "withdrawable": 0}}
 user_data = {}
-
-# store pending captcha answers
 captcha_answers = {}
+INVITE_REWARD = 100
+WITHDRAW_LIMIT = 888
 
 # ==========================
-# TELEGRAM BOT COMMANDS
+# HELPERS
+# ==========================
+def generate_captcha_text(length=5):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+def generate_captcha_image(text):
+    img = Image.new('RGB', (150, 60), color=(255, 255, 255))
+    d = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+    d.text((10, 10), text, fill=(0, 0, 0), font=font)
+    bio = BytesIO()
+    img.save(bio, format='PNG')
+    bio.seek(0)
+    return bio
+
+def get_balances(user_id):
+    data = user_data.setdefault(user_id, {"balance": 0, "withdrawable": 0})
+    return data["balance"], data["withdrawable"]
+
+# ==========================
+# COMMANDS
 # ==========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_data.setdefault(user.id, {"balance": 0})
+    user_data.setdefault(user.id, {"balance": 0, "withdrawable": 0})
     await update.message.reply_text(
-        f"👋 Welcome {user.first_name}!\n\n"
-        "Use /balance to check your pesos 💰\n"
-        "Use /captcha2earn to solve captchas 🧩\n"
-        "Use /dice to gamble 🎲\n"
-        "Use /scatterspin to spin 🎰\n"
-        "Use /withdraw to cash out 💵"
+        f"👋 Hello {user.first_name}!\n\n"
+        "💰 Check balance: /balance\n"
+        "🧩 Solve captcha: /captcha2earn\n"
+        "🎲 Play Dice: /dice\n"
+        "🎰 Scatter Spin: /scatterspin\n"
+        "💵 Withdraw: /withdraw\n"
+        "📩 Invite friends: /invite\n\n"
+        "📌 Note: Only game winnings add to your withdrawable balance!"
     )
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    data = user_data.get(user.id, {"balance": 0})
+    bal, withdrawable = get_balances(user.id)
     await update.message.reply_text(
-        f"⚖️ Balance: {data['balance']} pesos"
+        f"⚖️ Playable Balance: ₱{bal}\n"
+        f"💵 Withdrawable Balance: ₱{withdrawable}\n\n"
+        "📌 You can withdraw once withdrawable ≥ ₱888"
     )
 
 # ==========================
-# CAPTCHA SYSTEM
+# CAPTCHA
 # ==========================
 async def captcha2earn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # generate a simple captcha (number addition)
-    a = random.randint(1, 9)
-    b = random.randint(1, 9)
-    answer = a + b
-    captcha_answers[user.id] = answer
-    await update.message.reply_text(
-        f"🧩 Solve this captcha to earn reward:\n\n"
-        f"{a} + {b} = ?\n\n"
-        "Reply with the answer."
-    )
+    captcha_text = generate_captcha_text()
+    captcha_answers[user.id] = captcha_text
+    img = generate_captcha_image(captcha_text)
+    await update.message.reply_photo(photo=InputFile(img), caption="🧩 Type the letters/numbers to earn ₱ (playable only)!")
 
 async def check_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in captcha_answers:
-        try:
-            msg = int(update.message.text.strip())
-            if msg == captcha_answers[user.id]:
-                reward = random.randint(1, 10)
-                user_data.setdefault(user.id, {"balance": 0})
-                user_data[user.id]["balance"] += reward
-                await update.message.reply_text(
-                    f"✅ Correct! You earned ₱{reward}.\n"
-                    f"💰 Total balance: {user_data[user.id]['balance']} pesos"
-                )
-            else:
-                await update.message.reply_text("❌ Wrong answer! Try /captcha2earn again.")
-        except ValueError:
-            await update.message.reply_text("❌ Please enter a number.")
+        answer = captcha_answers[user.id]
+        if update.message.text.strip().upper() == answer:
+            reward = random.randint(10, 50)
+            user_data.setdefault(user.id, {"balance": 0, "withdrawable": 0})
+            user_data[user.id]["balance"] += reward
+            await update.message.reply_text(
+                f"✅ Correct! You earned ₱{reward} (Playable only).\n"
+                f"🎮 Play games to convert into withdrawable balance!"
+            )
+        else:
+            await update.message.reply_text("❌ Wrong captcha! Try /captcha2earn again.")
         del captcha_answers[user.id]
 
 # ==========================
-# OTHER COMMANDS
+# DICE GAME
+# ==========================
+async def dice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎲 Enter your bet amount for Dice:")
+    return 1
+
+async def dice_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        bet = int(update.message.text)
+        bal, withdrawable = get_balances(user.id)
+        if bet > bal:
+            await update.message.reply_text("🚫 Not enough balance.")
+            return ConversationHandler.END
+
+        user_roll = random.randint(1, 6)
+        bot_roll = random.randint(1, 6)
+
+        if user_roll > bot_roll:
+            user_data[user.id]["balance"] += bet
+            user_data[user.id]["withdrawable"] += bet
+            await update.message.reply_text(
+                f"🎲 You rolled {user_roll}, bot rolled {bot_roll}.\n"
+                f"🎉 You won ₱{bet}! (Added to both balances)\n"
+                f"New: Playable ₱{user_data[user.id]['balance']}, Withdrawable ₱{user_data[user.id]['withdrawable']}"
+            )
+        else:
+            user_data[user.id]["balance"] -= bet
+            await update.message.reply_text(
+                f"🎲 You rolled {user_roll}, bot rolled {bot_roll}.\n"
+                f"😢 You lost ₱{bet}. (Deducted from playable only)\n"
+                f"New: Playable ₱{user_data[user.id]['balance']}, Withdrawable ₱{user_data[user.id]['withdrawable']}"
+            )
+    except:
+        await update.message.reply_text("❌ Enter a valid number.")
+    return ConversationHandler.END
+
+# ==========================
+# SCATTER SPIN
+# ==========================
+async def scatterspin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎰 Scatter Spin Rules:\n"
+        "➡️ 3 same symbols = Jackpot (x3 bet)\n"
+        "➡️ 2 same symbols = Small win (+bet)\n"
+        "➡️ No match = Lose bet\n\n"
+        "Enter your bet amount:"
+    )
+    return 1
+
+async def scatterspin_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        bet = int(update.message.text)
+        bal, withdrawable = get_balances(user.id)
+        if bet > bal:
+            await update.message.reply_text("🚫 Not enough balance.")
+            return ConversationHandler.END
+
+        symbols = ["🍒", "7️⃣", "⭐", "💎"]
+        spin = [random.choice(symbols) for _ in range(3)]
+        result = " ".join(spin)
+
+        if len(set(spin)) == 1:  # 3 match
+            win = bet * 3
+            user_data[user.id]["balance"] += win
+            user_data[user.id]["withdrawable"] += win
+            msg = f"{result}\n🎉 JACKPOT! You won ₱{win}!"
+        elif len(set(spin)) == 2:  # 2 match
+            win = bet
+            user_data[user.id]["balance"] += win
+            user_data[user.id]["withdrawable"] += win
+            msg = f"{result}\n🎊 Nice! You matched 2 symbols and won ₱{win}!"
+        else:
+            user_data[user.id]["balance"] -= bet
+            msg = f"{result}\n😢 No match. You lost ₱{bet}."
+
+        await update.message.reply_text(
+            f"{msg}\n\n"
+            f"Playable: ₱{user_data[user.id]['balance']} | Withdrawable: ₱{user_data[user.id]['withdrawable']}"
+        )
+    except:
+        await update.message.reply_text("❌ Enter a valid number.")
+    return ConversationHandler.END
+
+# ==========================
+# WITHDRAW
 # ==========================
 async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    data = user_data.get(user.id, {"balance": 0})
-    if data["balance"] <= 0:
-        await update.message.reply_text("🚫 You don’t have any balance to withdraw yet.")
+    bal, withdrawable = get_balances(user.id)
+
+    if withdrawable < WITHDRAW_LIMIT:
+        await update.message.reply_text(
+            f"🚫 Minimum withdrawable is ₱{WITHDRAW_LIMIT}.\n"
+            f"💵 Your withdrawable: ₱{withdrawable}"
+        )
     else:
         await update.message.reply_text(
-            f"💵 Withdrawal request started for ₱{data['balance']}.\n"
-            "Please send your Full Name + GCash number here."
+            f"💵 Withdrawal request started!\n"
+            f"Amount: ₱{withdrawable}\n"
+            f"Please send your Full Name + GCash number."
         )
-        data["balance"] = 0  # reset balance after withdrawal
+        user_data[user.id]["withdrawable"] = 0  # reset withdrawable only
 
-async def dice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    roll = random.randint(1, 6)
-    await update.message.reply_text(f"🎲 You rolled: {roll}")
-
-async def scatterspin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbols = ["🍒", "7️⃣", "⭐", "💎"]
-    spin = [random.choice(symbols) for _ in range(3)]
-    result = " ".join(spin)
-    await update.message.reply_text(f"🎰 {result}")
-
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==========================
+# INVITE
+# ==========================
+async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    bal, withdrawable = get_balances(user.id)
+    user_data[user.id]["balance"] += INVITE_REWARD
     await update.message.reply_text(
-        "ℹ️ About this bot:\n"
-        "Earn by solving captchas and playing games!"
+        f"📩 Invite bonus! You earned ₱{INVITE_REWARD} (Playable only).\n"
+        f"New balance: ₱{user_data[user.id]['balance']}"
     )
 
 # ==========================
@@ -108,20 +213,30 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("captcha2earn", captcha2earn))
     app.add_handler(CommandHandler("withdraw", withdraw))
-    app.add_handler(CommandHandler("dice", dice))
-    app.add_handler(CommandHandler("scatterspin", scatterspin))
-    app.add_handler(CommandHandler("about", about))
+    app.add_handler(CommandHandler("invite", invite))
 
-    # Handle answers to captchas
+    dice_conv = ConversationHandler(
+        entry_points=[CommandHandler("dice", dice)],
+        states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, dice_bet)]},
+        fallbacks=[]
+    )
+    scatter_conv = ConversationHandler(
+        entry_points=[CommandHandler("scatterspin", scatterspin)],
+        states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, scatterspin_bet)]},
+        fallbacks=[]
+    )
+
+    app.add_handler(dice_conv)
+    app.add_handler(scatter_conv)
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_captcha))
 
     print("Bot is running...")
-    app.run_polling()  # Long polling keeps the bot alive on Render Free plan
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
